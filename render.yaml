@@ -1,0 +1,15 @@
+services:
+  - type: web
+    name: promptforge-ai
+    runtime: node
+    buildCommand: npm install
+    startCommand: node server.js
+    envVars:
+      - key: GEMINI_API_KEY
+        sync: false
+      - key: GEMINI_MODEL
+        value: gemini-2.5-flash
+        sync: false
+      - key: MOCK_MODE
+        value: "false"
+        sync: false
