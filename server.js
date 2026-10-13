@@ -79,6 +79,17 @@ Output ONLY the prompt. No commentary, no explanations, no markdown code fences.
 const app = express();
 app.set("trust proxy", 1); // needed on Render/Railway for correct IP rate limiting
 app.use(express.static(path.join(__dirname, "public")));
+// ---- homepage resilience: serve index.html even if a repo edit moved it out of public/ ----
+app.get("/", (req, res, next) => {
+  const candidates = [
+    path.join(__dirname, "public", "index.html"),
+    path.join(__dirname, "index.html"),
+  ];
+  const found = candidates.find((p) => fs.existsSync(p));
+  if (!found) return next();
+  res.sendFile(found);
+});
+
 
 // ---- abuse protection: 30 analyses per 15 minutes per IP ----
 app.use("/api/analyze", rateLimit({
