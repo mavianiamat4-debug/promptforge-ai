@@ -109,11 +109,12 @@
       duration = preview.duration;
       $("mDur").textContent = duration.toFixed(1) + "s";
       $("mSize").textContent = fmtMB(f.size);
-      var n = Math.max(8, Math.min(20, Math.round(duration)));
+      var n = Math.max(6, Math.min(10, Math.round(duration / 3)));
       $("mFrames").textContent = n;
       var meta = $("meta"); meta.style.display = "flex";
       var go = $("go");
-      if (duration > 30.5){ go.disabled = true; showErr("This video is " + duration.toFixed(1) + "s — the analyzer accepts up to 30 seconds."); }
+      if (f.size > 150 * 1048576){ go.disabled = true; showErr("This file is " + fmtMB(f.size) + " — the maximum is 150 MB. Please compress or trim it first."); }
+      else if (duration > 30.5){ go.disabled = true; showErr("This video is " + duration.toFixed(1) + "s — the analyzer accepts up to 30 seconds."); }
       else { go.disabled = false; }
     };
   }
@@ -138,22 +139,24 @@
     $("resultCard").style.display = "none";
     var think = $("think"); think.style.display = "block"; think.innerHTML = "";
     var go = $("go"); go.disabled = true;
-    thinkLines.forEach(function(line, i){
-      setTimeout(function(){
-        var d = document.createElement("div");
-        d.className = "step";
-        d.innerHTML = '<span class="spinner"></span>' + line;
-        think.appendChild(d);
-      }, i * 900);
-    });
+    var li = 0;
+    function showLine(){
+      think.innerHTML = '<div class="step"><span class="spinner"></span>' + thinkLines[li % thinkLines.length] + "</div>";
+      li++;
+    }
+    showLine();
+    var thinkTimer = setInterval(showLine, 4000);
 
     var fd = new FormData();
     fd.append("video", file, file.name);
-    fetch("/api/analyze", { method: "POST", body: fd })
-      .then(function(r){ return r.json().then(function(j){ return { status: r.status, body: j }; }); })
+    var ctrl = new AbortController();
+    var fetchTimer = setTimeout(function(){ ctrl.abort(); }, 360000);
+    fetch("/api/analyze", { method: "POST", body: fd, signal: ctrl.signal })
+      .then(function(r){ return r.text().then(function(t){ var j = null; try { j = JSON.parse(t); } catch(e){} return { status: r.status, body: j }; }); })
       .then(function(res){
+        clearInterval(thinkTimer); clearTimeout(fetchTimer);
         think.style.display = "none"; go.disabled = false;
-        if (res.status !== 200) throw new Error(res.body.error || "Analysis failed.");
+        if (res.status !== 200 || !res.body) throw new Error((res.body && res.body.error) || "The server took too long and the connection broke. Please try a shorter video.");
         $("out").textContent = res.body.prompt;
         var ok = $("ok");
         ok.textContent = "✓ Analyzed " + res.body.duration.toFixed(1) + "s video (" + res.body.frames + " frames)" + (res.body.mock ? " · MOCK MODE" : " · AI vision") + ".";
@@ -164,8 +167,10 @@
         out.scrollIntoView({ behavior: "smooth", block: "nearest" });
       })
       .catch(function(e){
+        clearInterval(thinkTimer); clearTimeout(fetchTimer);
         think.style.display = "none"; go.disabled = false;
-        showErr(e.message || "Analysis failed. Please try again.");
+        if (e.name === "AbortError") showErr("Analysis is taking too long — try a shorter video, or try again.");
+        else showErr(e.message || "Analysis failed. Please try again.");
       });
   });
 
