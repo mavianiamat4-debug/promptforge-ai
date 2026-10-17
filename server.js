@@ -79,6 +79,7 @@ Output ONLY the prompt. No commentary, no explanations, no markdown code fences.
 const app = express();
 app.set("trust proxy", 1); // needed on Render/Railway for correct IP rate limiting
 app.use(express.static(path.join(__dirname, "public")));
+
 // ---- homepage resilience: serve index.html even if a repo edit moved it out of public/ ----
 app.get("/", (req, res, next) => {
   const candidates = [
@@ -89,7 +90,6 @@ app.get("/", (req, res, next) => {
   if (!found) return next();
   res.sendFile(found);
 });
-
 
 // ---- abuse protection: 30 analyses per 15 minutes per IP ----
 app.use("/api/analyze", rateLimit({
@@ -117,7 +117,7 @@ app.get("/api/health", (req, res) => {
 async function getDuration(filePath) {
   const { stdout } = await execFileAsync(FFPROBE, [
     "-v", "error", "-show_entries", "format=duration", "-of", "csv=p=0", filePath,
-  ]);
+  ], { timeout: 30000 });
   const d = parseFloat(stdout.trim());
   if (!isFinite(d) || d <= 0) throw new Error("BAD_DURATION");
   return d;
@@ -129,10 +129,10 @@ async function extractFrames(videoPath, outDir, count, duration) {
   await execFileAsync(FFMPEG, [
     "-y", "-i", videoPath,
     "-vf", `fps=${fps},scale=640:-2`,
-    "-q:v", "3",
+    "-q:v", "5",
     "-frames:v", String(count),
     path.join(outDir, "frame-%02d.jpg"),
-  ]);
+  ], { timeout: 90000 });
   const files = fs.readdirSync(outDir).filter(f => f.endsWith(".jpg")).sort();
   const step = duration / count;
   return files.map((f, i) => ({
@@ -163,7 +163,7 @@ async function askGemini(frames, duration, aspectHint) {
         body: JSON.stringify({
           system_instruction: { parts: [{ text: SYSTEM_INSTRUCTION }] },
           contents: [{ parts }],
-          generationConfig: { temperature: 0.6, maxOutputTokens: 16000 },
+          generationConfig: { temperature: 0.6, maxOutputTokens: 8000 },
         }),
       }
     );
@@ -234,8 +234,13 @@ app.post("/api/analyze", upload.single("video"), async (req, res) => {
       });
     }
 
-    // Adaptive: complex (longer) videos get more frames, simple ones fewer
-    const frameCount = Math.max(8, Math.min(20, Math.round(duration)));
+    // Fail fast: no API key means no analysis — don't waste time extracting frames first
+    if (!MOCK_MODE && !GEMINI_API_KEY) {
+      return res.status(500).json({ error: "Server is missing its GEMINI_API_KEY. The site owner needs to add it." });
+    }
+
+    // Adaptive: complex (longer) videos get more frames, simple ones fewer (capped for speed)
+    const frameCount = Math.max(6, Math.min(10, Math.round(duration / 3)));
     const frameDir = path.join(os.tmpdir(), "pf-frames-" + Date.now());
     tmpFiles.push(frameDir);
     const frames = await extractFrames(req.file.path, frameDir, frameCount, duration);
@@ -244,9 +249,6 @@ app.post("/api/analyze", upload.single("video"), async (req, res) => {
     if (MOCK_MODE) {
       prompt = mockPrompt(duration);
     } else {
-      if (!GEMINI_API_KEY) {
-        return res.status(500).json({ error: "Server is missing its GEMINI_API_KEY. The site owner needs to add it." });
-      }
       prompt = await askGemini(frames, duration, "vertical 9:16");
     }
 
@@ -260,6 +262,7 @@ app.post("/api/analyze", upload.single("video"), async (req, res) => {
     else if (err.message.startsWith("GEMINI_")) msg = "The AI service returned an error. Please try again in a moment.";
     else if (err.message.startsWith("EMPTY_RESPONSE")) msg = "The AI returned an empty response — please retry.";
     else if (err.name === "AbortError") msg = "Analysis timed out — please try a shorter video.";
+    else if (err.killed) msg = "Video processing took too long — try a shorter or smaller video file.";
     res.status(502).json({ error: msg });
   } finally {
     for (const p of tmpFiles) {
